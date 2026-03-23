@@ -927,7 +927,7 @@ def _get_environment_snapshot() -> dict:
         props = torch.cuda.get_device_properties(0)
         env["gpu_name"] = props.name
         env["gpu_sm_version"] = f"{props.major}.{props.minor}"
-        env["gpu_memory_gb"] = round(props.total_mem / 1e9, 1)
+        env["gpu_memory_gb"] = round(props.total_memory / 1e9, 1)
         env["gpu_count"] = torch.cuda.device_count()
 
         # GPU temperature (best-effort via nvidia-smi)
@@ -1141,7 +1141,7 @@ Examples:
     props = torch.cuda.get_device_properties(0)
     print(f"GPU:           {props.name}")
     print(f"SM version:    {props.major}.{props.minor}")
-    print(f"GPU memory:    {props.total_mem / 1e9:.1f} GB")
+    print(f"GPU memory:    {props.total_memory / 1e9:.1f} GB")
     print(f"PyTorch:       {torch.__version__}")
     print(f"CUDA:          {torch.version.cuda}")
     print(f"FlashMLA:      {'available' if FLASH_MLA_AVAILABLE else 'NOT INSTALLED'}")

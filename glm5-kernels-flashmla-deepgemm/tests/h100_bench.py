@@ -494,7 +494,7 @@ def main():
     props = torch.cuda.get_device_properties(device)
     if rank == 0:
         print(f"GPU: {props.name} (SM{props.major}{props.minor})")
-        print(f"Memory: {props.total_mem / 1e9:.1f} GB")
+        print(f"Memory: {props.total_memory / 1e9:.1f} GB")
         print(f"World size: {world_size}")
         print(f"Mode: {args.mode}")
         print()
@@ -558,7 +558,7 @@ def main():
         output = {
             "gpu": props.name,
             "sm_version": f"{props.major}.{props.minor}",
-            "gpu_memory_gb": props.total_mem / 1e9,
+            "gpu_memory_gb": props.total_memory / 1e9,
             "world_size": world_size,
             "config": "full" if args.full_dims else "small",
             "results": [

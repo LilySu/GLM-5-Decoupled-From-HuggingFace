@@ -410,7 +410,7 @@ def main():
 
     device = "cuda"
     props = torch.cuda.get_device_properties(device)
-    print(f"GPU: {props.name} (SM{props.major}{props.minor}, {props.total_mem / 1e9:.1f} GB)")
+    print(f"GPU: {props.name} (SM{props.major}{props.minor}, {props.total_memory / 1e9:.1f} GB)")
     print(f"FlashInfer: {'installed' if has_flashinfer() else 'NOT installed (using eager fallback)'}")
     print(f"DeepGEMM: {'installed' if has_deep_gemm() else 'NOT installed (using loop fallback)'}")
     print()

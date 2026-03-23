@@ -45,17 +45,62 @@ def bench_single_layer(layer_type: str, B: int, S: int, T: int,
     """
     device = torch.device("cuda")
 
-    # Import model layer based on implementation
+    # Import model layer based on implementation.
+    # The model directories use relative imports (from .mla_attention import ...)
+    # so we must import them as packages, not by sys.path insertion.
     try:
+        import importlib
         if impl in ("flashmla", "eager"):
-            sys.path.insert(0, os.path.join(PROJECT_ROOT, "glm5-kernels-flashmla-deepgemm"))
-            from model import DecoderLayer
+            pkg_name = "glm5-kernels-flashmla-deepgemm"
         elif impl == "flashinfer":
-            sys.path.insert(0, os.path.join(PROJECT_ROOT, "glm5-kernels-flashinfer"))
-            from model import DecoderLayer
+            pkg_name = "glm5-kernels-flashinfer"
         else:
             raise ValueError(f"Unknown impl: {impl}")
-    except ImportError as e:
+
+        pkg_dir = os.path.join(PROJECT_ROOT, pkg_name)
+        if not os.path.isdir(pkg_dir):
+            raise ImportError(f"Directory not found: {pkg_dir}")
+
+        # Convert hyphenated dir name to valid Python: add parent to path and use importlib
+        # The package has __init__.py, so we load model.py from within it
+        model_path = os.path.join(pkg_dir, "model.py")
+        if not os.path.isfile(model_path):
+            raise ImportError(f"model.py not found in {pkg_dir}")
+
+        # Ensure parent dir is on sys.path so "from .xxx import" works
+        parent_dir = os.path.dirname(pkg_dir)
+        if parent_dir not in sys.path:
+            sys.path.insert(0, parent_dir)
+
+        # Python can't import hyphenated package names directly.
+        # Workaround: create a symlink or use importlib with the actual path.
+        # Simplest: temporarily rename in sys.modules
+        pkg_python_name = pkg_name.replace("-", "_")
+        spec = importlib.util.spec_from_file_location(
+            f"{pkg_python_name}.model",
+            model_path,
+            submodule_search_locations=[pkg_dir],
+        )
+        # First register the package itself so relative imports work
+        pkg_init = os.path.join(pkg_dir, "__init__.py")
+        if os.path.isfile(pkg_init):
+            pkg_spec = importlib.util.spec_from_file_location(
+                pkg_python_name, pkg_init,
+                submodule_search_locations=[pkg_dir],
+            )
+            pkg_mod = importlib.util.module_from_spec(pkg_spec)
+            sys.modules[pkg_python_name] = pkg_mod
+            try:
+                pkg_spec.loader.exec_module(pkg_mod)
+            except Exception:
+                pass  # __init__.py may have optional imports that fail
+
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[f"{pkg_python_name}.model"] = mod
+        spec.loader.exec_module(mod)
+        DecoderLayer = mod.DecoderLayer
+
+    except (ImportError, AttributeError, Exception) as e:
         return BenchResult(
             name=f"layer_{layer_type}", impl=impl,
             config={"B": B, "S": S, "T": T, "type": layer_type},
