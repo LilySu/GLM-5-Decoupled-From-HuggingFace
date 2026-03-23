@@ -225,9 +225,10 @@ def moe_forward_deepgemm(
     sorted_tok = token_indices[sort_order]
     sorted_w = flat_weights[sort_order]
 
-    # Count tokens per expert → m_grouped_gemm expects cumulative sizes
-    expert_counts = torch.bincount(sorted_ids, minlength=E)  # [E]
-    expert_ends = expert_counts.cumsum(0).to(torch.int32)    # [E] cumulative
+    # Build per-row expert index — m_grouped_fp8_gemm_nt_contiguous expects
+    # grouped_layout[i] = expert_id for row i, shape [N*K], dtype int32
+    # Tokens are already sorted by expert, so sorted_ids IS the layout
+    grouped_layout = sorted_ids.to(torch.int32)  # [N*K]
 
     # Gather sorted input
     gathered = hidden_states[sorted_tok]  # [N*K, D]
@@ -258,7 +259,7 @@ def moe_forward_deepgemm(
     gate_up_out = torch.empty(gathered.shape[0], I2, dtype=torch.bfloat16, device=device)
 
     # Gate + up projection: [N*K, D] × [E, 2*I, D]^T → [N*K, 2*I]
-    deep_gemm.m_grouped_fp8_gemm_nt_contiguous(a_fp8, b_gate_up_fp8, gate_up_out, expert_ends)
+    deep_gemm.m_grouped_fp8_gemm_nt_contiguous(a_fp8, b_gate_up_fp8, gate_up_out, grouped_layout)
 
     gate, up = gate_up_out.chunk(2, dim=-1)  # each [N*K, I]
     activated = F.silu(gate) * up            # SwiGLU [N*K, I]
@@ -276,7 +277,7 @@ def moe_forward_deepgemm(
     down_out = torch.empty(gathered.shape[0], D, dtype=torch.bfloat16, device=device)
 
     # Down projection: [N*K, I] × [E, D, I]^T → [N*K, D]
-    deep_gemm.m_grouped_fp8_gemm_nt_contiguous(c_fp8, b_down_fp8, down_out, expert_ends)
+    deep_gemm.m_grouped_fp8_gemm_nt_contiguous(c_fp8, b_down_fp8, down_out, grouped_layout)
 
     # Scatter-accumulate with routing weights back to [N, D]
     output = torch.zeros(N, D, dtype=torch.bfloat16, device=device)
