@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GLM-5 Architecture: DeepSeek V3.2 vs Raw PyTorch vs Triton</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+  :root {
+    --bg: #0d0f14;
+    --panel: #13161e;
+    --border: #1f2433;
+    --ds-accent: #22d3ee;
+    --raw-accent: #60a5fa;
+    --tri-accent: #a3e635;
+    --triton-color: #f97316;
+    --pytorch-color: #60a5fa;
+    --dsa-color: #fb923c;
+    --mla-color: #38bdf8;
+    --moe-color: #c084fc;
+    --shared-color: #a78bfa;
+    --text: #c9d1e0;
+    --muted: #4a5568;
+    --row-shared: rgba(167,139,250,0.06);
+    --row-ds: rgba(34,211,238,0.06);
+    --row-glm: rgba(163,230,53,0.06);
+    --row-triton: rgba(249,115,22,0.06);
+    --row-dsa: rgba(251,146,60,0.06);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; min-height: 100vh; padding: 32px 24px 48px; }
+
+  header { text-align: center; margin-bottom: 28px; }
+  header h1 { font-family: 'Inter', sans-serif; font-size: 1.5rem; font-weight: 800; color: #e2e8f0; margin-bottom: 6px; }
+  header p { font-size: 0.68rem; color: var(--muted); letter-spacing: 0.09em; text-transform: uppercase; }
+
+  .legend { display: flex; justify-content: center; gap: 22px; margin-bottom: 20px; flex-wrap: wrap; }
+  .legend-item { display: flex; align-items: center; gap: 7px; font-size: 0.64rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .legend-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+
+  /* ---- Three-column comparison table ---- */
+  .comp-table { max-width: 1600px; margin: 0 auto 20px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--panel); }
+  .comp-table .thead { display: grid; grid-template-columns: 200px 1fr 1fr 1fr; border-bottom: 2px solid var(--border); }
+  .comp-table .thead .th { padding: 12px 16px; font-family: 'Inter', sans-serif; font-size: 0.72rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.06em; }
+  .th-label { color: var(--muted); }
+  .th-ds { color: var(--ds-accent); background: rgba(34,211,238,0.06); }
+  .th-raw { color: var(--raw-accent); background: rgba(96,165,250,0.06); }
+  .th-tri { color: var(--tri-accent); background: rgba(163,230,53,0.06); }
+
+  .comp-table .row { display: grid; grid-template-columns: 200px 1fr 1fr 1fr; border-bottom: 1px solid var(--border); }
+  .comp-table .row:last-child { border-bottom: none; }
+  .comp-table .row .cell { padding: 8px 14px; font-size: 0.62rem; line-height: 1.7; border-right: 1px solid var(--border); }
+  .comp-table .row .cell:last-child { border-right: none; }
+  .cell-label { font-weight: 700; color: var(--text); display: flex; align-items: center; gap: 6px; }
+
+  /* Row color coding */
+  .row-shared .cell { background: var(--row-shared); }
+  .row-dsa .cell { background: var(--row-dsa); }
+  .row-ds .cell { background: var(--row-ds); }
+  .row-glm .cell { background: var(--row-glm); }
+  .row-triton .cell:nth-child(4) { background: var(--row-triton); }
+  .row-triton-full .cell:nth-child(4) { background: rgba(249,115,22,0.10); }
+
+  /* Inline tags */
+  .tag { font-size: 0.52rem; padding: 1px 6px; border-radius: 3px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; white-space: nowrap; vertical-align: middle; }
+  .tag-triton { background: rgba(249,115,22,0.15); color: var(--triton-color); border: 1px solid rgba(249,115,22,0.3); }
+  .tag-pytorch { background: rgba(96,165,250,0.12); color: var(--pytorch-color); border: 1px solid rgba(96,165,250,0.25); }
+  .tag-dsa { background: rgba(251,146,60,0.12); color: var(--dsa-color); border: 1px solid rgba(251,146,60,0.25); }
+  .tag-mla { background: rgba(56,189,248,0.1); color: var(--mla-color); border: 1px solid rgba(56,189,248,0.2); }
+  .tag-moe { background: rgba(192,132,252,0.1); color: var(--moe-color); border: 1px solid rgba(192,132,252,0.2); }
+  .tag-shared { background: rgba(167,139,250,0.1); color: var(--shared-color); border: 1px solid rgba(167,139,250,0.2); }
+  .tag-stub { background: rgba(100,100,100,0.1); color: #888; border: 1px solid rgba(100,100,100,0.25); }
+  .tag-new { background: rgba(163,230,53,0.12); color: var(--tri-accent); border: 1px solid rgba(163,230,53,0.25); }
+
+  .hl-triton { color: var(--triton-color); font-weight: 600; }
+  .hl-pytorch { color: var(--pytorch-color); font-weight: 600; }
+  .hl-dsa { color: var(--dsa-color); font-weight: 600; }
+  .hl-mla { color: var(--mla-color); font-weight: 600; }
+  .hl-moe { color: var(--moe-color); font-weight: 600; }
+  .hl-ds { color: var(--ds-accent); font-weight: 600; }
+  .hl-glm { color: var(--tri-accent); font-weight: 600; }
+  .hl-same { color: var(--shared-color); }
+  .dm { color: var(--muted); }
+
+  /* ---- Sections ---- */
+  .diff-bar { text-align: center; padding: 18px 0 8px; font-size: 0.62rem; color: var(--muted); letter-spacing: 0.1em; text-transform: uppercase; }
+
+  .section { max-width: 1600px; margin: 14px auto 0; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 18px 24px; }
+  .section h3 { font-family: 'Inter', sans-serif; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 14px; text-align: center; }
+  .section.hl-border-dsa { border-color: rgba(251,146,60,0.3); }
+  .section.hl-border-dsa h3 { color: var(--dsa-color); }
+  .section.hl-border-mla { border-color: rgba(56,189,248,0.3); }
+  .section.hl-border-mla h3 { color: var(--mla-color); }
+  .section.hl-border-moe { border-color: rgba(192,132,252,0.3); }
+  .section.hl-border-moe h3 { color: var(--moe-color); }
+
+  .detail-duo { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .detail-trio { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+  .detail-card { border-radius: 8px; padding: 14px 16px; font-size: 0.62rem; line-height: 1.75; }
+  .detail-card h4 { font-family: 'Inter', sans-serif; font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px; }
+  .card-ds { background: rgba(34,211,238,0.04); border: 1px solid rgba(34,211,238,0.15); }
+  .card-ds h4 { color: var(--ds-accent); }
+  .card-raw { background: rgba(96,165,250,0.04); border: 1px solid rgba(96,165,250,0.15); }
+  .card-raw h4 { color: var(--raw-accent); }
+  .card-tri { background: rgba(163,230,53,0.04); border: 1px solid rgba(163,230,53,0.15); }
+  .card-tri h4 { color: var(--tri-accent); }
+  .card-dsa { background: rgba(251,146,60,0.04); border: 1px solid rgba(251,146,60,0.15); }
+  .card-dsa h4 { color: var(--dsa-color); }
+  .card-mla { background: rgba(56,189,248,0.04); border: 1px solid rgba(56,189,248,0.15); }
+  .card-mla h4 { color: var(--mla-color); }
+  .card-moe { background: rgba(192,132,252,0.04); border: 1px solid rgba(192,132,252,0.15); }
+  .card-moe h4 { color: var(--moe-color); }
+  .dk { color: var(--muted); }
+  .dv { color: var(--text); }
+  .hi { font-weight: 700; }
+
+  /* ---- Callout ---- */
+  .callout { max-width: 1600px; margin: 14px auto 0; background: var(--panel); border: 1px solid rgba(251,146,60,0.25); border-radius: 10px; padding: 18px 24px; font-size: 0.63rem; line-height: 1.85; text-align: center; color: var(--text); }
+  .callout strong { font-weight: 700; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>GLM-5 Architecture Comparison</h1>
+  <p>DeepSeek V3.2 (origin) &nbsp;vs&nbsp; GLM-5 Raw PyTorch &nbsp;vs&nbsp; GLM-5 Triton-Accelerated</p>
+</header>
+
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot" style="background:#a78bfa"></div>Shared (identical in both models)</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#22d3ee"></div>DeepSeek V3.2</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#60a5fa"></div>GLM-5 PyTorch</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#f97316"></div>Triton kernel (unsloth)</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#fb923c"></div>DSA (sparse attention)</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#c084fc"></div>MoE (256 experts)</div>
+</div>
+
+<!-- ================================================================== -->
+<!-- LINE-BY-LINE FORWARD PASS                                           -->
+<!-- ================================================================== -->
+<div class="diff-bar">-- Forward Pass: Line-by-Line Comparison --</div>
+
+<div class="comp-table">
+  <div class="thead">
+    <div class="th th-label">Component</div>
+    <div class="th th-ds">DeepSeek V3.2</div>
+    <div class="th th-raw">GLM-5 Raw PyTorch</div>
+    <div class="th th-tri">GLM-5 Triton</div>
+  </div>
+
+  <!-- Embedding -->
+  <div class="row row-shared">
+    <div class="cell cell-label"><span class="tag tag-shared">shared</span> Embedding</div>
+    <div class="cell"><span class="hl-same">nn.Embedding</span> <span class="dm">152K vocab, dim 7168</span></div>
+    <div class="cell"><span class="hl-pytorch">nn.Embedding</span> <span class="dm">154K vocab, dim 6144</span></div>
+    <div class="cell"><span class="hl-pytorch">nn.Embedding</span> <span class="dm">154K vocab, dim 6144</span></div>
+  </div>
+
+  <!-- RoPE -->
+  <div class="row row-shared">
+    <div class="cell cell-label"><span class="tag tag-shared">shared</span> RoPE</div>
+    <div class="cell"><span class="hl-same">Decoupled RoPE</span> <span class="dm">128-dim rope portion</span></div>
+    <div class="cell"><span class="hl-pytorch">RotaryEmbedding</span> <span class="dm">64-dim rope portion</span><br><span class="dm">model.py line 105</span></div>
+    <div class="cell"><span class="hl-pytorch">RotaryEmbedding</span> <span class="dm">64-dim rope, rope_partial.py</span></div>
+  </div>
+
+  <!-- Causal Mask -->
+  <div class="row row-shared">
+    <div class="cell cell-label"><span class="tag tag-shared">shared</span> Causal Mask</div>
+    <div class="cell"><span class="hl-same">Standard causal</span> <span class="dm">[1,1,S,T]</span></div>
+    <div class="cell"><span class="hl-pytorch">make_causal_mask</span> <span class="dm">model.py line 88</span></div>
+    <div class="cell"><span class="hl-pytorch">make_causal_mask</span> <span class="dm">model.py</span></div>
+  </div>
+
+  <!-- Layer count -->
+  <div class="row row-ds">
+    <div class="cell cell-label">Layer Count</div>
+    <div class="cell"><span class="hl-ds">3 dense + 58 MoE = 61</span></div>
+    <div class="cell"><span class="hl-pytorch">3 dense + 75 MoE = 78</span></div>
+    <div class="cell"><span class="hl-pytorch">3 dense + 75 MoE = 78</span></div>
+  </div>
+
+  <!-- Pre-norm -->
+  <div class="row row-triton-full">
+    <div class="cell cell-label"><span class="tag tag-shared">shared</span> Pre-Norm</div>
+    <div class="cell"><span class="hl-same">RMSNorm</span> <span class="dm">dim 7168</span></div>
+    <div class="cell"><span class="hl-pytorch">RMSNorm.forward</span> <span class="dm">PyTorch: x.float() -> rsqrt</span></div>
+    <div class="cell"><span class="hl-triton">fast_rms_layernorm</span> <span class="tag tag-triton">Triton</span><br><span class="dm">fused fwd+bwd, unsloth_rms_layernorm.py</span></div>
+  </div>
+
+  <!-- Q compress -->
+  <div class="row row-shared">
+    <div class="cell cell-label"><span class="tag tag-mla">MLA</span> Q compress</div>
+    <div class="cell"><span class="hl-same">q_a_proj</span> <span class="dm">7168 -> 1536</span></div>
+    <div class="cell"><span class="hl-pytorch">q_a_proj</span> <span class="dm">6144 -> 2048</span></div>
+    <div class="cell"><span class="hl-pytorch">q_a_proj</span> <span class="dm">6144 -> 2048, mla_attention.py</span></div>
+  </div>
+
+  <!-- Q layernorm -->
+  <div class="row row-triton-full">
+    <div class="cell cell-label"><span class="tag tag-mla">MLA</span> Q LayerNorm</div>
+    <div class="cell"><span class="hl-same">RMSNorm</span> <span class="dm">dim 1536</span></div>
+    <div class="cell"><span class="hl-pytorch">RMSNorm</span> <span class="dm">dim 2048</span></div>
+    <div class="cell"><span class="hl-triton">fast_rms_layernorm</span> <span class="tag tag-triton">Triton</span> <span class="dm">swappable</span></div>
+  </div>
+
+  <!-- Q expand -->
+  <div class="row row-shared">
+    <div class="cell cell-label"><span class="tag tag-mla">MLA</span> Q expand</div>
+    <div class="cell"><span class="hl-same">q_b_proj</span> <span class="dm">1536 -> 128*192 = 24576</span></div>
+    <div class="cell"><span class="hl-pytorch">q_b_proj</span> <span class="dm">2048 -> 64*256 = 16384</span></div>
+    <div class="cell"><span class="hl-pytorch">q_b_proj</span> <span class="dm">2048 -> 16384</span></div>
+  </div>
+
+  <!-- KV compress -->
+  <div class="row row-shared">
+    <div class="cell cell-label"><span class="tag tag-mla">MLA</span> KV compress</div>
+    <div class="cell"><span class="hl-same">kv_a_proj</span> <span class="dm">7168 -> 512+128 = 640</span></div>
+    <div class="cell"><span class="hl-pytorch">kv_a_proj</span> <span class="dm">6144 -> 512+64 = 576</span></div>
+    <div class="cell"><span class="hl-pytorch">kv_a_proj</span> <span class="dm">6144 -> 576</span></div>
+  </div>
+
+  <!-- KV layernorm -->
+  <div class="row row-triton-full">
+    <div class="cell cell-label"><span class="tag tag-mla">MLA</span> KV LayerNorm</div>
+    <div class="cell"><span class="hl-same">RMSNorm</span> <span class="dm">dim 512</span></div>
+    <div class="cell"><span class="hl-pytorch">RMSNorm</span> <span class="dm">dim 512</span></div>
+    <div class="cell"><span class="hl-triton">fast_rms_layernorm</span> <span class="tag tag-triton">Triton</span> <span class="dm">swappable</span></div>
+  </div>
+
+  <!-- KV expand -->
+  <div class="row row-shared">
+    <div class="cell cell-label"><span class="tag tag-mla">MLA</span> KV expand</div>
+    <div class="cell"><span class="hl-same">kv_b_proj</span> <span class="dm">512 -> 128*(128+128) = 32768</span></div>
+    <div class="cell"><span class="hl-pytorch">kv_b_proj</span> <span class="dm">512 -> 64*(192+256) = 28672</span></div>
+    <div class="cell"><span class="hl-pytorch">kv_b_proj</span> <span class="dm">512 -> 28672</span></div>
+  </div>
+
+  <!-- Partial RoPE -->
+  <div class="row row-shared">
+    <div class="cell cell-label"><span class="tag tag-shared">shared</span> Partial RoPE</div>
+    <div class="cell"><span class="hl-same">RoPE on 128-dim slice only</span></div>
+    <div class="cell"><span class="hl-pytorch">apply_rotary_pos_emb</span> <span class="dm">64-dim slice of 256</span></div>
+    <div class="cell"><span class="hl-pytorch">apply_rotary_pos_emb</span> <span class="dm">rope_partial.py, 64-dim</span></div>
+  </div>
+
+  <!-- DSA Indexer -->
+  <div class="row row-dsa">
+    <div class="cell cell-label"><span class="tag tag-dsa">DSA</span> Indexer</div>
+    <div class="cell"><span class="hl-dsa">DSA_Indexer</span> <span class="dm">invented by DeepSeek</span><br><span class="dm">CUDA top-k (non-deterministic)</span></div>
+    <div class="cell"><span class="hl-dsa">DSAIndexer</span> <span class="dm">model.py line 139</span><br><span class="dm">torch.topk (deterministic)</span></div>
+    <div class="cell"><span class="hl-pytorch">DSAIndexer</span> <span class="dm">dsa_indexer.py</span><br><span class="dm">torch.topk (deterministic)</span></div>
+  </div>
+
+  <!-- DSA Mask -->
+  <div class="row row-dsa">
+    <div class="cell cell-label"><span class="tag tag-dsa">DSA</span> Sparse Mask</div>
+    <div class="cell"><span class="hl-dsa">gather(KV, top-k indices)</span><br><span class="dm">only compute over selected KV</span></div>
+    <div class="cell"><span class="hl-pytorch">build + scatter -inf mask</span><br><span class="dm">full QK^T still computed, masked out</span></div>
+    <div class="cell"><span class="hl-pytorch">build_dsa_mask</span><br><span class="dm">dsa_sparse_attention.py, same as raw</span></div>
+  </div>
+
+  <!-- Attention -->
+  <div class="row row-shared">
+    <div class="cell cell-label"><span class="tag tag-shared">shared</span> Attention</div>
+    <div class="cell"><span class="hl-same">softmax(QK^T/sqrt(d)) V</span><br><span class="dm">FlashAttention / SDPA</span></div>
+    <div class="cell"><span class="hl-pytorch">eager_attention_forward</span><br><span class="dm">torch.matmul + F.softmax</span></div>
+    <div class="cell"><span class="hl-pytorch">eager_attention_forward</span><br><span class="dm">dsa_sparse_attention.py</span></div>
+  </div>
+
+  <!-- O proj -->
+  <div class="row row-shared">
+    <div class="cell cell-label"><span class="tag tag-shared">shared</span> O projection</div>
+    <div class="cell"><span class="hl-same">o_proj</span> <span class="dm">heads*v_dim -> hidden</span></div>
+    <div class="cell"><span class="hl-pytorch">o_proj</span> <span class="dm">64*256 -> 6144</span></div>
+    <div class="cell"><span class="hl-pytorch">o_proj</span> <span class="dm">64*256 -> 6144</span></div>
+  </div>
+
+  <!-- Post-attn norm -->
+  <div class="row row-triton-full">
+    <div class="cell cell-label"><span class="tag tag-shared">shared</span> Post-Attn Norm</div>
+    <div class="cell"><span class="hl-same">RMSNorm</span></div>
+    <div class="cell"><span class="hl-pytorch">RMSNorm.forward</span></div>
+    <div class="cell"><span class="hl-triton">fast_rms_layernorm</span> <span class="tag tag-triton">Triton</span></div>
+  </div>
+
+  <!-- SwiGLU activation -->
+  <div class="row row-triton-full">
+    <div class="cell cell-label"><span class="tag tag-shared">shared</span> SwiGLU</div>
+    <div class="cell"><span class="hl-same">SiLU(gate) * up</span> <span class="dm">in each expert</span></div>
+    <div class="cell"><span class="hl-pytorch">F.silu(gate) * up</span></div>
+    <div class="cell"><span class="hl-triton">swiglu_fg_kernel</span> <span class="tag tag-triton">Triton</span><br><span class="dm">unsloth_swiglu.py, fused fwd+bwd</span></div>
+  </div>
+
+  <!-- Router -->
+  <div class="row row-shared">
+    <div class="cell cell-label"><span class="tag tag-moe">MoE</span> Router</div>
+    <div class="cell"><span class="hl-same">Sigmoid + group select + top-8</span><br><span class="dm">aux-loss-free bias correction</span></div>
+    <div class="cell"><span class="hl-pytorch">TopkRouter + route_tokens</span><br><span class="dm">sigmoid, bias, group mask, topk</span></div>
+    <div class="cell"><span class="hl-pytorch">TopkRouter + route_tokens</span><br><span class="dm">model.py, identical logic</span></div>
+  </div>
+
+  <!-- Expert dispatch -->
+  <div class="row row-triton">
+    <div class="cell cell-label"><span class="tag tag-moe">MoE</span> Expert Dispatch</div>
+    <div class="cell"><span class="hl-same">Grouped GEMM</span> <span class="dm">batched kernel, 256 experts</span></div>
+    <div class="cell"><span class="hl-pytorch">for-loop over experts</span><br><span class="dm">F.linear per active expert</span></div>
+    <div class="cell"><span class="hl-pytorch">for-loop</span> <span class="dm">(reference)</span><br><span class="hl-triton">grouped_gemm</span> <span class="tag tag-triton">available</span><br><span class="dm">unsloth_moe/, ready to wire in</span></div>
+  </div>
+
+  <!-- Shared expert -->
+  <div class="row row-shared">
+    <div class="cell cell-label"><span class="tag tag-moe">MoE</span> Shared Expert</div>
+    <div class="cell"><span class="hl-same">1 always-active SwiGLU</span></div>
+    <div class="cell"><span class="hl-pytorch">FeedForward</span> <span class="dm">(SwiGLU)</span></div>
+    <div class="cell"><span class="hl-pytorch">FeedForward</span> <span class="dm">model.py</span></div>
+  </div>
+
+  <!-- Scaling -->
+  <div class="row row-ds">
+    <div class="cell cell-label"><span class="tag tag-moe">MoE</span> Scaling</div>
+    <div class="cell"><span class="hl-ds">16x scaling factor</span></div>
+    <div class="cell"><span class="hl-pytorch">2.5x scaling factor</span></div>
+    <div class="cell"><span class="hl-pytorch">2.5x scaling factor</span></div>
+  </div>
+
+  <!-- Final norm -->
+  <div class="row row-triton-full">
+    <div class="cell cell-label"><span class="tag tag-shared">shared</span> Final Norm</div>
+    <div class="cell"><span class="hl-same">RMSNorm</span></div>
+    <div class="cell"><span class="hl-pytorch">RMSNorm.forward</span></div>
+    <div class="cell"><span class="hl-triton">fast_rms_layernorm</span> <span class="tag tag-triton">Triton</span></div>
+  </div>
+
+  <!-- LM Head -->
+  <div class="row row-shared">
+    <div class="cell cell-label"><span class="tag tag-shared">shared</span> LM Head</div>
+    <div class="cell"><span class="hl-same">nn.Linear</span> <span class="dm">-> 152K logits</span></div>
+    <div class="cell"><span class="hl-pytorch">nn.Linear</span> <span class="dm">-> 154K logits</span></div>
+    <div class="cell"><span class="hl-pytorch">nn.Linear</span> <span class="dm">-> 154K logits</span></div>
+  </div>
+
+  <!-- Loss -->
+  <div class="row row-triton-full">
+    <div class="cell cell-label">Loss</div>
+    <div class="cell"><span class="hl-same">Cross-Entropy</span></div>
+    <div class="cell"><span class="hl-pytorch">F.cross_entropy</span></div>
+    <div class="cell"><span class="hl-triton">fast_cross_entropy_loss</span> <span class="tag tag-triton">Triton</span><br><span class="dm">chunked 3x65536 for 154K vocab</span></div>
+  </div>
+
+  <!-- MTP -->
+  <div class="row row-ds">
+    <div class="cell cell-label">MTP</div>
+    <div class="cell"><span class="hl-ds">MTP-1, 1 draft layer</span><br><span class="dm">DualPipe param sharing</span></div>
+    <div class="cell"><span class="dm">Not in released weights</span></div>
+    <div class="cell"><span class="tag tag-stub">stub</span> <span class="dm">mtp.py, NotImplementedError</span></div>
+  </div>
+
+  <!-- LoRA (training only) -->
+  <div class="row row-triton-full">
+    <div class="cell cell-label">LoRA (training)</div>
+    <div class="cell"><span class="dm">Not applicable (base model)</span></div>
+    <div class="cell"><span class="dm">Not included</span></div>
+    <div class="cell"><span class="hl-triton">LoRA_MLP, LoRA_QKV, LoRA_W</span> <span class="tag tag-triton">Triton</span><br><span class="dm">unsloth_fast_lora.py, fused fwd+bwd</span></div>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<!-- SCALE COMPARISON                                                    -->
+<!-- ================================================================== -->
+<div class="diff-bar">-- Scale Comparison: DeepSeek V3.2 vs GLM-5 --</div>
+
+<div class="comp-table">
+  <div class="thead">
+    <div class="th th-label">Metric</div>
+    <div class="th th-ds">DeepSeek V3.2</div>
+    <div class="th th-raw" style="grid-column: span 2;">GLM-5</div>
+  </div>
+  <div class="row"><div class="cell cell-label">Total params</div><div class="cell"><span class="hl-ds">685B</span></div><div class="cell" style="grid-column: span 2;"><span class="hl-glm">744B</span> <span class="dm">(+8.6%)</span></div></div>
+  <div class="row"><div class="cell cell-label">Active params</div><div class="cell"><span class="hl-ds">37B</span></div><div class="cell" style="grid-column: span 2;"><span class="hl-glm">40B</span> <span class="dm">(+8.1%)</span></div></div>
+  <div class="row"><div class="cell cell-label">Layers</div><div class="cell"><span class="hl-ds">3 dense + 58 MoE = 61</span></div><div class="cell" style="grid-column: span 2;"><span class="hl-glm">3 dense + 75 MoE = 78</span></div></div>
+  <div class="row"><div class="cell cell-label">Hidden dim</div><div class="cell">7168</div><div class="cell" style="grid-column: span 2;">6144</div></div>
+  <div class="row"><div class="cell cell-label">Attention heads</div><div class="cell">128</div><div class="cell" style="grid-column: span 2;">64</div></div>
+  <div class="row"><div class="cell cell-label">QK head dim</div><div class="cell">128 (nope) + 64 (rope) = 192</div><div class="cell" style="grid-column: span 2;">192 (nope) + 64 (rope) = 256</div></div>
+  <div class="row"><div class="cell cell-label">V head dim</div><div class="cell">128</div><div class="cell" style="grid-column: span 2;">256</div></div>
+  <div class="row"><div class="cell cell-label">KV LoRA dim</div><div class="cell">512</div><div class="cell" style="grid-column: span 2;">512 <span class="dm">(identical)</span></div></div>
+  <div class="row"><div class="cell cell-label">Q LoRA dim</div><div class="cell">1536</div><div class="cell" style="grid-column: span 2;">2048</div></div>
+  <div class="row"><div class="cell cell-label">Total experts</div><div class="cell">256</div><div class="cell" style="grid-column: span 2;">256 <span class="dm">(identical)</span></div></div>
+  <div class="row"><div class="cell cell-label">Routed per token</div><div class="cell">8</div><div class="cell" style="grid-column: span 2;">8 <span class="dm">(identical)</span></div></div>
+  <div class="row"><div class="cell cell-label">MoE intermediate</div><div class="cell">2048</div><div class="cell" style="grid-column: span 2;">2048 <span class="dm">(identical)</span></div></div>
+  <div class="row"><div class="cell cell-label">Vocab size</div><div class="cell">152K</div><div class="cell" style="grid-column: span 2;">154K</div></div>
+  <div class="row"><div class="cell cell-label">Context window</div><div class="cell">128K</div><div class="cell" style="grid-column: span 2;">200K <span class="dm">(+56%)</span></div></div>
+  <div class="row"><div class="cell cell-label">Training data</div><div class="cell">14.8T tokens</div><div class="cell" style="grid-column: span 2;">28.5T tokens <span class="dm">(1.9x)</span></div></div>
+  <div class="row"><div class="cell cell-label">MTP layers</div><div class="cell">1 (predicts +1 token)</div><div class="cell" style="grid-column: span 2;">1 shared across 3 draft steps</div></div>
+  <div class="row"><div class="cell cell-label">Hardware</div><div class="cell">NVIDIA H800</div><div class="cell" style="grid-column: span 2;">Huawei Ascend + 6 other domestic chips</div></div>
+</div>
+
+<!-- ================================================================== -->
+<!-- UNIQUE FEATURES                                                     -->
+<!-- ================================================================== -->
+<div class="diff-bar">-- What Makes GLM-5 Unique --</div>
+
+<div class="section hl-border-dsa">
+  <h3>DSA: DeepSeek Sparse Attention</h3>
+  <div class="detail-duo">
+    <div class="detail-card card-dsa">
+      <h4>How the indexer works</h4>
+      <span class="dk">1. Query:</span> <span class="dv">q_resid [B,S,2048] -> wq_b -> [B,S,32*128] -> partial RoPE -> concat</span><br>
+      <span class="dk">2. Key:</span> <span class="dv">hidden [B,S,6144] -> wk -> [B,S,128] -> LayerNorm -> partial RoPE -> concat</span><br>
+      <span class="dk">3. Score:</span> <span class="dv">einsum(q,k) * scale -> <span class="hi" style="color:#fb923c">ReLU</span> -> weighted sum across 32 heads -> [B,S,T]</span><br>
+      <span class="dk">4. Select:</span> <span class="dv"><span class="hi" style="color:#fb923c">torch.topk</span>(scores, k=2048) -> sparse indices [B,S,2048]</span><br>
+      <span class="dk">5. Mask:</span> <span class="dv">Scatter indices into -inf mask, combine with causal mask</span><br><br>
+      <span class="dk">Result:</span> <span class="dv hi">O(n * 2048) instead of O(n^2) -- 1.5-2x speedup at 128K+ context</span>
+    </div>
+    <div class="detail-card card-dsa">
+      <h4>Why DSA beats alternatives</h4>
+      <span class="dk">vs Sliding Window:</span> <span class="dv">SWA loses 30 pts on RULER@128K. DSA is lossless.</span><br>
+      <span class="dk">vs Linear Attention:</span> <span class="dv">GDN/SimpleGDN degrade on retrieval. DSA doesn't.</span><br>
+      <span class="dk">Key insight:</span> <span class="dv hi">90% of attention entries at 128K are redundant</span><br><br>
+      <span class="dk">Critical RL fix:</span> <span class="dv" style="color:#a3e635">Non-deterministic CUDA topk broke RL in a few steps.</span><br>
+      <span class="dv">Switching to deterministic torch.topk solved it. (Paper Section 3.2)</span><br><br>
+      <span class="dk">RL strategy:</span> <span class="dv">Indexer params are <span class="hi">frozen during RL</span> -- only the main model trains.</span>
+    </div>
+  </div>
+</div>
+
+<div class="section hl-border-mla">
+  <h3>MLA: Multi-Latent Attention</h3>
+  <div class="detail-duo">
+    <div class="detail-card card-mla">
+      <h4>KV compression path</h4>
+      <span class="dk">Standard GQA cache:</span> <span class="dv">128 dims * 8 KV heads = 1024 per token</span><br>
+      <span class="dk">MLA cache:</span> <span class="dv hi">512 latent + 64 rope = 576 per token (44% smaller)</span><br><br>
+      <span class="dk">Compress:</span> <span class="dv">hidden(6144) -> kv_a_proj -> latent(512) + rope(64)</span><br>
+      <span class="dk">Expand:</span> <span class="dv">latent(512) -> kv_b_proj -> K_nope(192*64) + V(256*64)</span><br><br>
+      <span class="dk">Q path:</span> <span class="dv">hidden(6144) -> q_a(2048) -> RMSNorm -> q_b(16384=64*256)</span>
+    </div>
+    <div class="detail-card card-mla">
+      <h4>GLM-5 MLA innovations</h4>
+      <span class="dk">Muon Split:</span> <span class="dv hi">Orthogonalize per-head, not per-matrix</span><br>
+      <span class="dv">Standard MLA + Muon couldn't match GQA-8. Per-head orthogonalization fixes it.</span><br><br>
+      <span class="dk">Head dim:</span> <span class="dv">Increased 192 -> 256, reduced heads by 1/3</span><br>
+      <span class="dv">Same training FLOPs but lower decode compute.</span><br><br>
+      <span class="dk">Stable logits:</span> <span class="dv">With Muon Split, attention logit scale stays stable without clipping.</span>
+    </div>
+  </div>
+</div>
+
+<div class="section hl-border-moe">
+  <h3>256-Expert MoE with Sigmoid Routing</h3>
+  <div class="detail-duo">
+    <div class="detail-card card-moe">
+      <h4>Routing mechanism</h4>
+      <span class="dk">1.</span> <span class="dv">Linear projection -> per-expert scores</span><br>
+      <span class="dk">2.</span> <span class="dv hi">Sigmoid activation (not softmax)</span><br>
+      <span class="dk">3.</span> <span class="dv">Add e_score_correction_bias (load balancing, no aux loss)</span><br>
+      <span class="dk">4.</span> <span class="dv">Group scores -> select top groups -> top-8 within groups</span><br>
+      <span class="dk">5.</span> <span class="dv">Normalize weights, scale by 2.5x</span><br><br>
+      <span class="dk">Why sigmoid?</span> <span class="dv">Independent expert scoring (softmax forces competition)</span>
+    </div>
+    <div class="detail-card card-moe">
+      <h4>Expert storage</h4>
+      <span class="dk">Format:</span> <span class="dv hi">Stacked 3D tensors</span><br>
+      <span class="dv">gate_up_proj: [256, 4096, 6144]</span><br>
+      <span class="dv">down_proj: [256, 6144, 2048]</span><br><br>
+      <span class="dk">Reference:</span> <span class="dv">Per-expert Python loop (model.py)</span><br>
+      <span class="dk">Accelerated:</span> <span class="dv" style="color:#f97316">Triton grouped_gemm in unsloth_moe/</span><br>
+      <span class="dv">Covers ~60% of total FLOPs across 75 MoE layers</span>
+    </div>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<!-- DISTINGUISHING FEATURES                                             -->
+<!-- ================================================================== -->
+<div class="callout">
+  <strong>6 features that distinguish GLM-5 from Llama, Qwen, Mistral, and other architectures:</strong><br><br>
+  <strong class="hl-dsa">1. DSA</strong> -- Learned sparse token selection. No other family uses this. Makes 200K context affordable.<br>
+  <strong class="hl-mla">2. MLA</strong> -- KV compressed to 576-dim latent instead of full per-head caching. 44% less memory than GQA-8.<br>
+  <strong class="hl-moe">3. 256 fine-grained experts</strong> -- Most MoE models use 8-64. Finer specialization at same active budget.<br>
+  <strong class="hl-triton">4. Sigmoid routing</strong> -- Independent expert scoring, not softmax competition. With group selection + 2.5x scale.<br>
+  <strong class="hl-glm">5. MTP param sharing</strong> -- 3 draft layers share 1 weight set. Acceptance rate 2.76 (vs DeepSeek's 2.55).<br>
+  <strong style="color:#a3e635">6. Deterministic top-k for RL</strong> -- CUDA non-deterministic topk broke training. torch.topk fixed it. Unique finding.
+</div>
+
+</body>
+</html>
