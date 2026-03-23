@@ -1,0 +1,34 @@
+FROM runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404
+
+# System deps
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+
+# Triton
+RUN pip install triton
+
+# FlashMLA (SM90 only, skip SM100/Blackwell)
+RUN cd /workspace && \
+    git clone --recurse-submodules --depth=1 https://github.com/deepseek-ai/FlashMLA.git && \
+    cd FlashMLA && \
+    git submodule update --init --recursive --depth=1 && \
+    FLASH_MLA_DISABLE_SM100=1 pip install -v --no-build-isolation . && \
+    cd /workspace
+
+# DeepGEMM
+RUN cd /workspace && \
+    git clone https://github.com/deepseek-ai/DeepGEMM.git && \
+    cd DeepGEMM && \
+    git submodule update --init --recursive --depth=1 && \
+    pip install -v --no-build-isolation . && \
+    cd /workspace
+
+# DeepGEMM JIT settings
+ENV DG_JIT_USE_NVRTC=1
+ENV DG_JIT_CACHE_DIR=/workspace/.deep_gemm
+
+# Verify installations
+RUN python3 -c "import torch; print('PyTorch', torch.__version__)" && \
+    python3 -c "import flash_mla; print('FlashMLA OK')" && \
+    python3 -c "import deep_gemm; print('DeepGEMM', deep_gemm.__version__)"
+
+WORKDIR /workspace

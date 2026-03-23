@@ -243,10 +243,14 @@ def moe_forward_deepgemm(
             return (x.to(torch.float8_e4m3fn), torch.ones(x.shape[0], device=x.device))
 
     # Quantize activations: (gathered_fp8, gathered_scales)
-    a_fp8 = per_custom_dims_cast_to_fp8(gathered, (0,), False)
+    # per_custom_dims_cast_to_fp8 expects BF16/FP32 input — cast if already FP8
+    gathered_bf16 = gathered.to(torch.bfloat16) if gathered.dtype == torch.float8_e4m3fn else gathered
+    a_fp8 = per_custom_dims_cast_to_fp8(gathered_bf16, (0,), False)
 
     # Quantize gate_up weights: [E, 2*I, D] → reshape → quantize → reshape back
-    gu_flat = gate_up_weight.reshape(E * I2, D)
+    # Cast to BF16 first if weights are already FP8 (per_custom_dims_cast_to_fp8 needs float input)
+    gu_bf16 = gate_up_weight.to(torch.bfloat16) if gate_up_weight.dtype == torch.float8_e4m3fn else gate_up_weight
+    gu_flat = gu_bf16.reshape(E * I2, D)
     gu_fp8_flat = per_custom_dims_cast_to_fp8(gu_flat, (0,), False)
     b_gate_up_fp8 = (gu_fp8_flat[0].view(E, I2, D), gu_fp8_flat[1].view(E, I2))
 
@@ -259,11 +263,12 @@ def moe_forward_deepgemm(
     gate, up = gate_up_out.chunk(2, dim=-1)  # each [N*K, I]
     activated = F.silu(gate) * up            # SwiGLU [N*K, I]
 
-    # Quantize activated for down projection
+    # Quantize activated for down projection (SwiGLU output is BF16, safe to quantize directly)
     c_fp8 = per_custom_dims_cast_to_fp8(activated, (0,), False)
 
     # Quantize down weights: [E, D, I] → reshape → quantize → reshape back
-    dw_flat = down_weight.reshape(E * D, I)
+    dw_bf16 = down_weight.to(torch.bfloat16) if down_weight.dtype == torch.float8_e4m3fn else down_weight
+    dw_flat = dw_bf16.reshape(E * D, I)
     dw_fp8_flat = per_custom_dims_cast_to_fp8(dw_flat, (0,), False)
     b_down_fp8 = (dw_fp8_flat[0].view(E, D, I), dw_fp8_flat[1].view(E, D))
 
