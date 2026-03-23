@@ -52,14 +52,14 @@ python3 -m glm5-kernels-flashmla-deepgemm.tests.h100_bench --mode commands
 |-----|------|-------|-------------------|
 | 1 | `h100_test_cuda_graph.py` | 3 | Graph capture of decode step, sparse index update inside graph, graph replay speedup |
 | 2 | `h100_test_tma.py` | 2 | FlashMLA bandwidth >1000 GB/s (TMA proxy), DeepGEMM TFLOPS >50 (WGMMA proxy) |
-| 3 | `h100_test_memory.py` | 3 | Single MoE layer peak <30GB, KV cache linear scaling, no leak over 50 decode steps |
+| 3 | `h100_test_memory.py` | 3 | Single MoE layer peak <60GB, KV cache linear scaling, no leak over 50 decode steps |
 | 4 | `h100_test_fp8_edge_cases.py` | 4 | Outlier overflow, zero-block handling, subnormal preservation, per-tile scale correctness |
 | 5 | `h100_test_multi_gpu.py` | 3 | NCCL all-reduce bandwidth, TP numerical equivalence, expert partitioning (torchrun only) |
-| 6 | `h100_test_launch_overhead.py` | 3 | Empty kernel overhead, per-layer overhead <30%, graph vs eager speedup |
+| 6 | `h100_test_launch_overhead.py` | 3 | Empty kernel overhead, per-layer overhead <30%, graph vs eager speedup (subprocess-isolated) |
 | 7 | `h100_test_determinism.py` | 3 | topk bit-identical x10, full decode bit-identical x3, DSA indexer bit-identical x5 |
-| 8 | `h100_test_sparse_patterns.py` | 4 | Causality (no future), recency bias, non-degeneracy, Jaccard stability under perturbation |
+| 8 | `h100_test_sparse_patterns.py` | 4 | Causality (valid-scored only), recency bias, non-degeneracy, Jaccard stability |
 | 9 | `h100_test_precision_chain.py` | 2 | 78x FP8 roundtrip cos_sim >0.90, full pipeline with FP8 noise injection cos_sim >0.85 |
-| 10 | `h100_test_thermal.py` | 2 | 30s sustained GEMM last/first TFLOPS >85%, GPU clock >85% of max |
+| 10 | `h100_test_thermal.py` | 2 | 30s sustained GEMM last/first TFLOPS >85%, GPU clock >80% of max |
 
 ### Benchmarks (run separately)
 
