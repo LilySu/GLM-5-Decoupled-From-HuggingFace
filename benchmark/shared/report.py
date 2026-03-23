@@ -65,7 +65,9 @@ def capture_environment() -> Dict[str, Any]:
 
     # CUDA memory
     if torch.cuda.is_available():
-        env["gpu_memory_total_gb"] = torch.cuda.get_device_properties(0).total_mem / 1e9
+        props = torch.cuda.get_device_properties(0)
+        total = getattr(props, 'total_memory', None) or getattr(props, 'total_mem', 0)
+        env["gpu_memory_total_gb"] = total / 1e9
         env["gpu_memory_allocated_gb"] = torch.cuda.memory_allocated(0) / 1e9
 
     return env
