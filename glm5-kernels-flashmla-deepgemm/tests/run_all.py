@@ -143,6 +143,23 @@ H100_TEST_MODULES = [
 # torchrun --nproc_per_node=2 -m glm5-kernels-flashmla-deepgemm.tests.h100_test_multi_gpu
 
 
+def _try_reset_cuda():
+    """Attempt to reset CUDA state between tests to prevent cascade failures.
+
+    Failed CUDA graph captures leave the context broken. This cleans up
+    between tests so one failure doesn't cascade into all subsequent tests.
+    """
+    try:
+        import gc
+        import torch
+        if torch.cuda.is_available():
+            gc.collect()
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+    except Exception:
+        pass
+
+
 def run_test_list(test_modules, label):
     all_results = {}
     total = 0
@@ -155,6 +172,8 @@ def run_test_list(test_modules, label):
         for fn_name in test_fns:
             total += 1
             full_name = f"{module_name}.{fn_name}"
+            # Reset CUDA state before each H100 test to prevent cascade failures
+            _try_reset_cuda()
             try:
                 fn = getattr(mod, fn_name)
                 result = fn()
