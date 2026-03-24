@@ -30,6 +30,56 @@ from benchmark.shared import (
 from benchmark.shared.config import GLM5_CONFIG, H100_SPECS
 from benchmark.shared.report import print_summary_table
 
+# The model's DecoderLayer expects the full model config dict (with keys like
+# "num_attention_heads", "num_key_value_heads", etc.), NOT the benchmark summary
+# dict (GLM5_CONFIG which uses "num_heads"). Import the model's config format.
+def _get_model_config():
+    """Get the full model config dict that DecoderLayer expects."""
+    _ensure_symlinks()
+    try:
+        mod = __import__("glm5_kernels_flashmla_deepgemm.config", fromlist=["GLM_MOE_DSA_CONFIG"])
+        return dict(mod.GLM_MOE_DSA_CONFIG)
+    except ImportError:
+        # Fallback: construct from GLM5_CONFIG with correct key names
+        return {
+            "vocab_size": 154880,
+            "hidden_size": 6144,
+            "tie_word_embeddings": False,
+            "num_hidden_layers": 78,
+            "intermediate_size": 12288,
+            "num_attention_heads": 64,
+            "num_key_value_heads": 64,
+            "attention_bias": False,
+            "attention_dropout": 0.0,
+            "q_lora_rank": 2048,
+            "kv_lora_rank": 512,
+            "qk_rope_head_dim": 64,
+            "qk_nope_head_dim": 192,
+            "qk_head_dim": 256,
+            "v_head_dim": 256,
+            "n_routed_experts": 256,
+            "n_shared_experts": 1,
+            "num_experts_per_tok": 8,
+            "moe_intermediate_size": 2048,
+            "routed_scaling_factor": 2.5,
+            "n_group": 1,
+            "topk_group": 1,
+            "norm_topk_prob": True,
+            "index_topk": 2048,
+            "index_head_dim": 128,
+            "index_n_heads": 32,
+            "hidden_act": "silu",
+            "rms_norm_eps": 1e-5,
+            "max_position_embeddings": 202752,
+            "rope_theta": 10000.0,
+            "initializer_range": 0.02,
+            "pad_token_id": None,
+            "bos_token_id": 0,
+            "eos_token_id": 1,
+            "use_cache": True,
+            "mlp_layer_types": ["dense"] * 3 + ["sparse"] * 75,
+        }
+
 
 def _ensure_symlinks():
     """Create underscore-named symlinks for hyphenated model directories.
@@ -140,9 +190,9 @@ def bench_single_layer(layer_type, B, S, T, impl, cfg, warmup=10, iters=50):
             error=f"Benchmark failed: {e}",
         )
 
-    H = cfg["num_attention_heads"]
-    d_qk = cfg.get("d_qk_absorbed", 576)
-    d_v = cfg.get("d_v_absorbed", 512)
+    H = cfg.get("num_attention_heads", cfg.get("num_heads", 64))
+    d_qk = cfg.get("qk_head_dim", 256)
+    d_v = cfg.get("v_head_dim", 256)
     attn_flops = compute_attention_flops(B, H, S, T, d_qk, d_v)
 
     if layer_type == "sparse":
@@ -179,7 +229,7 @@ def bench_single_layer(layer_type, B, S, T, impl, cfg, warmup=10, iters=50):
 def run_component_benchmark(output_dir="results/triple_report"):
     """Run the component integration benchmark. Saves partial results on failure."""
     results = []
-    cfg = GLM5_CONFIG
+    cfg = _get_model_config()
 
     configs = [
         {"B": 32, "S": 1, "T": 4096, "label": "decode_B32_T4K"},
