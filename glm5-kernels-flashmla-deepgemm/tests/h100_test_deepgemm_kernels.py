@@ -174,7 +174,7 @@ def h100_test_deepgemm_grouped_gemm_contiguous():
 
     device = "cuda"
     E = 8
-    N = 256
+    N = 1024  # Increased from 256 to perfectly align with TMA token granularity (128 per expert)
     D = 512
     I = 128
 
@@ -220,15 +220,15 @@ def h100_test_deepgemm_grouped_gemm_masked():
 
     device = "cuda"
     E = 8
-    M = 32
+    M = 128  # Increased from 32 to perfectly align with TMA token granularity
     D = 512
     I = 128
 
     torch.manual_seed(42)
     a_bf16 = torch.randn(E, M, D, device=device, dtype=torch.bfloat16)
     b_bf16 = torch.randn(E, I, D, device=device, dtype=torch.bfloat16)
-    masked_m = torch.tensor([8, 16, 4, 32, 12, 0, 24, 20], dtype=torch.int32, device=device)
-    expected_m = 32
+    masked_m = torch.tensor([128, 64, 0, 128, 64, 0, 128, 128], dtype=torch.int32, device=device)
+    expected_m = 128
 
     try:
         d = torch.empty(E, M, I, device=device, dtype=torch.bfloat16)

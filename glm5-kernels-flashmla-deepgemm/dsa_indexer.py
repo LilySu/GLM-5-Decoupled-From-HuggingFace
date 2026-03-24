@@ -19,6 +19,7 @@ from .rope_partial import apply_rotary_pos_emb
 
 try:
     import deep_gemm
+    from deep_gemm.utils import per_token_cast_to_fp8
     DEEP_GEMM_AVAILABLE = True
 except ImportError:
     DEEP_GEMM_AVAILABLE = False
@@ -133,9 +134,8 @@ class DSAIndexer(nn.Module):
         q_fp8 = q_3d.to(torch.float8_e4m3fn)
 
         # KV: tuple of (FP8 tensor [T, D], 1D scales [T])
-        # Scales MUST be 1D — per_custom_dims_cast_to_fp8 gives wrong dims
-        k_fp8 = k_2d.to(torch.float8_e4m3fn)
-        k_scales = k_2d.abs().amax(dim=-1).float().clamp(min=1e-4) / 448.0
+        # Use per_token_cast_to_fp8 with ue8m0=True (confirmed by fix_kernels_h100.py)
+        kv_tuple = per_token_cast_to_fp8(k_2d, use_ue8m0=True)
 
         # ── Causal sequence ranges ────────────────────────────────────
         cu_k_start = torch.zeros(seq_len, dtype=torch.int32, device=q.device)
@@ -151,7 +151,7 @@ class DSAIndexer(nn.Module):
 
         # ── Kernel call ───────────────────────────────────────────────
         logits = deep_gemm.fp8_mqa_logits(
-            q_fp8, (k_fp8, k_scales), w_2d,
+            q_fp8, kv_tuple, w_2d,
             cu_k_start, cu_k_end,
         )
 

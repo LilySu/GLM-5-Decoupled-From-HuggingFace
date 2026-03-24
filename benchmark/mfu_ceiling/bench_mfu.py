@@ -121,6 +121,9 @@ def _make_mla_decode_fn(B: int, T_ctx: int, precision: str):
                                    dtype=torch.int32).reshape(B, n_pages)
         softmax_scale = d_qk ** -0.5
 
+        # Initialize the required metadata object for FlashMLA 1.0+ API
+        tile_scheduler_metadata, _ = flash_mla.get_mla_metadata(cache_seqlens, B, H, page_size)
+
         def fn():
             return flash_mla.flash_mla_with_kvcache(
                 q.view(B, H, S_q, d_qk),
@@ -128,7 +131,8 @@ def _make_mla_decode_fn(B: int, T_ctx: int, precision: str):
                 block_table,
                 cache_seqlens,
                 d_v,
-                softmax_scale,
+                tile_scheduler_metadata,
+                softmax_scale=softmax_scale,
                 causal=True,
             )
     except (ImportError, Exception):
@@ -146,7 +150,7 @@ def _make_mla_decode_fn(B: int, T_ctx: int, precision: str):
 
 
 def _make_mla_prefill_fn(B: int, S: int, precision: str):
-    """Return a zero-arg callable for MLA prefill (S_q = S_kv = S)."""
+    """Return a zero-arg callable for MLA prefill (S_q == S_kv = S)."""
     H    = GLM5_CONFIG["num_heads"]
     d_qk = GLM5_CONFIG["d_qk_absorbed"]
     d_v  = GLM5_CONFIG["d_v_absorbed"]
@@ -212,15 +216,15 @@ def _make_moe_gemm_fn(N_tokens: int, precision: str):
             # gate_up pass
             out_gate_up = torch.empty(N_tokens * K_active, 2 * I,
                                       device="cuda", dtype=torch.bfloat16)
-            deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt(
-                (x_grouped, w_gate_up), out_gate_up, m_sizes
+            deep_gemm.m_grouped_fp8_gemm_nt_contiguous(
+                x_grouped, w_gate_up, out_gate_up, m_sizes
             )
             gate, up = out_gate_up.chunk(2, dim=-1)
             act = torch.nn.functional.silu(gate) * up
             out = torch.empty(N_tokens * K_active, H,
                               device="cuda", dtype=torch.bfloat16)
-            deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt(
-                (act, w_down), out, m_sizes
+            deep_gemm.m_grouped_fp8_gemm_nt_contiguous(
+                act, w_down, out, m_sizes
             )
             return out
 
@@ -263,14 +267,23 @@ def _make_dsa_indexer_fn(T_ctx: int):
         # Use DeepGEMM fp8_mqa_logits if available
         q_fp8 = q_idx.to(torch.float8_e4m3fn)
         k_fp8 = k_idx.to(torch.float8_e4m3fn)
-        scale_q = torch.ones(1, device="cuda")
-        scale_k = torch.ones(1, device="cuda")
+        
+        # New API requires a tuple for kv, so we pass a dummy v
+        dummy_v_fp8 = torch.empty_like(k_fp8)
+        
+        # Sequence lengths for batching
+        cu_seq_len_k_start = torch.tensor([0], dtype=torch.int32, device="cuda")
+        cu_seq_len_k_end   = torch.tensor([T_ctx], dtype=torch.int32, device="cuda")
 
         def fn():
-            # score: [S_q, T_ctx]  via fp8 matmul over (H_idx, D_idx) dim
-            scores = deep_gemm.fp8_mqa_logits(q_fp8, k_fp8, scale_q, scale_k)
-            weighted = (scores * w_head.unsqueeze(0).unsqueeze(0)).sum(-1)
-            return torch.relu(weighted)
+            # Updated signature tracking sequence lengths and weights directly
+            return deep_gemm.fp8_mqa_logits(
+                q_fp8, 
+                (k_fp8, dummy_v_fp8), 
+                w_head, 
+                cu_seq_len_k_start, 
+                cu_seq_len_k_end
+            )
 
     except (ImportError, Exception):
         def fn():

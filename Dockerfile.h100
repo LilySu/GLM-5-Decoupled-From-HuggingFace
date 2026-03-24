@@ -6,29 +6,40 @@ RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 # Triton
 RUN pip install triton
 
-# FlashMLA (SM90 only, skip SM100/Blackwell)
+# FlashMLA (SM90 only, skip SM100/Blackwell — needs NVCC 12.9)
+ENV TORCH_CUDA_ARCH_LIST="9.0"
 RUN cd /workspace && \
     git clone --recurse-submodules --depth=1 https://github.com/deepseek-ai/FlashMLA.git && \
     cd FlashMLA && \
     git submodule update --init --recursive --depth=1 && \
-    FLASH_MLA_DISABLE_SM100=1 pip install -v --no-build-isolation . && \
+    FLASH_MLA_DISABLE_SM100=1 MAX_JOBS=4 pip install -v --no-build-isolation . && \
     cd /workspace
 
 # DeepGEMM
 RUN cd /workspace && \
-    git clone https://github.com/deepseek-ai/DeepGEMM.git && \
+    git clone --depth=1 https://github.com/deepseek-ai/DeepGEMM.git && \
     cd DeepGEMM && \
     git submodule update --init --recursive --depth=1 && \
     pip install -v --no-build-isolation . && \
     cd /workspace
 
+# FlashInfer (pip wheels for cu128 + torch2.8)
+RUN pip install flashinfer-python
+
 # DeepGEMM JIT settings
 ENV DG_JIT_USE_NVRTC=1
-ENV DG_JIT_CACHE_DIR=/workspace/.deep_gemm
+ENV DG_JIT_CACHE_DIR=/workspace/.deep_gemm_cache
+RUN mkdir -p /workspace/.deep_gemm_cache
 
-# Verify installations
-RUN python3 -c "import torch; print('PyTorch', torch.__version__)" && \
-    python3 -c "import flash_mla; print('FlashMLA OK')" && \
-    python3 -c "import deep_gemm; print('DeepGEMM', deep_gemm.__version__)"
+# Python deps for benchmarks
+RUN pip install scipy pandas numpy safetensors
+
+# Verify all installations
+RUN python3 -c "\
+import torch; print(f'PyTorch {torch.__version__}, CUDA {torch.version.cuda}'); \
+import flash_mla; print('FlashMLA OK'); \
+import deep_gemm; print(f'DeepGEMM {deep_gemm.__version__}'); \
+import flashinfer; print('FlashInfer OK'); \
+"
 
 WORKDIR /workspace

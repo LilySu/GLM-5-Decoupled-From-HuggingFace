@@ -24,6 +24,7 @@ import torch
 import torch.nn as nn
 from .rope_partial import apply_rotary_pos_emb
 from .dsa_indexer import DSAIndexer
+from .cache import PagedKVCache
 
 try:
     from flash_mla import (
@@ -123,7 +124,166 @@ class MLAttention(nn.Module):
         # FlashMLA scheduler metadata (lazy init)
         self._flash_mla_metadata = None
 
+    def absorb_weights(self):
+        """Absorb kv_b_proj into Q and O projections for FlashMLA compatibility.
+
+        After absorption:
+        - KV cache stores 576D (512 compressed nope + 64 BF16 rope)
+        - Query is projected to 576D (512 absorbed nope + 64 rope) per head
+        - Output projection maps [num_heads, 512] -> [hidden_size]
+        - kv_b_proj is no longer needed (removed)
+
+        This enables FlashMLA kernels which require d_qk=576, d_v=512.
+        """
+        if hasattr(self, '_weights_absorbed') and self._weights_absorbed:
+            return
+
+        W_kv_b = self.kv_b_proj.weight  # [H*(qk_nope+v_head), kv_lora_rank]
+        W_kv_b = W_kv_b.view(self.num_heads, self.qk_nope_head_dim + self.v_head_dim, self.kv_lora_rank)
+        W_k_nope = W_kv_b[:, :self.qk_nope_head_dim, :]  # [H, qk_nope, kv_lora]
+        W_v = W_kv_b[:, self.qk_nope_head_dim:, :]        # [H, v_head, kv_lora]
+
+        # Absorb W_k_nope into Q_b_proj: Q_absorbed_nope = Q_nope @ W_k_nope
+        # Q_b produces [H, qk_nope + qk_rope] per token
+        # We replace the nope portion: new_q_nope[h] = old_q_nope[h] @ W_k_nope[h]
+        # This makes q_nope match the kv_lora_rank (512) dimension
+        if self.q_lora_rank is not None:
+            W_qb = self.q_b_proj.weight  # [H*qk_head, q_lora_rank]
+            W_qb = W_qb.view(self.num_heads, self.qk_head_dim, self.q_lora_rank)
+            W_qb_nope = W_qb[:, :self.qk_nope_head_dim, :]  # [H, qk_nope, q_lora]
+            W_qb_rope = W_qb[:, self.qk_nope_head_dim:, :]  # [H, qk_rope, q_lora]
+
+            # absorbed_nope: [H, kv_lora, q_lora] = W_k_nope^T @ W_qb_nope
+            W_qb_absorbed = torch.bmm(W_k_nope.transpose(1, 2), W_qb_nope)  # [H, kv_lora, q_lora]
+            # New q_b weight: [H, (kv_lora + qk_rope), q_lora]
+            W_qb_new = torch.cat([W_qb_absorbed, W_qb_rope], dim=1)
+            new_q_b = nn.Linear(self.q_lora_rank, self.num_heads * (self.kv_lora_rank + self.qk_rope_head_dim), bias=False)
+            new_q_b.weight.data = W_qb_new.reshape(-1, self.q_lora_rank).to(self.q_b_proj.weight.device)
+            self.q_b_proj = new_q_b.to(device=self.q_b_proj.weight.device, dtype=self.q_b_proj.weight.dtype)
+
+        # Absorb W_v into O_proj: O_absorbed = O @ W_v (per head)
+        # W_o: [hidden, H*v_head] -> reshaped to [hidden, H, v_head]
+        # W_v: [H, v_head, kv_lora]
+        # O_new[:, h, :] = W_o[:, h, :] @ W_v[h] -> [hidden, H, kv_lora]
+        hidden_dim = self.o_proj.weight.shape[0]
+        W_o = self.o_proj.weight.view(hidden_dim, self.num_heads, self.v_head_dim)
+        W_o_new = torch.einsum('dhv,hvl->dhl', W_o, W_v)  # [hidden, H, kv_lora]
+        device = self.o_proj.weight.device
+        dtype = self.o_proj.weight.dtype
+        new_o = nn.Linear(self.num_heads * self.kv_lora_rank, hidden_dim, bias=False)
+        new_o.weight.data = W_o_new.reshape(hidden_dim, -1).to(device)
+        self.o_proj = new_o.to(device=device, dtype=dtype)
+
+        # Update dimensions for absorbed path
+        self._absorbed_qk_dim = self.kv_lora_rank + self.qk_rope_head_dim  # 576
+        self._absorbed_v_dim = self.kv_lora_rank  # 512
+
+        # Remove kv_b_proj (no longer needed)
+        del self.kv_b_proj
+
+        self._weights_absorbed = True
+
     def forward(self, hidden_states, position_embeddings, attention_mask=None, past_key_values=None, **kwargs):
+        if hasattr(self, '_weights_absorbed') and self._weights_absorbed:
+            return self._absorbed_forward(hidden_states, position_embeddings, attention_mask, past_key_values)
+        return self._eager_forward(hidden_states, position_embeddings, attention_mask, past_key_values)
+
+    def _absorbed_forward(self, hidden_states, position_embeddings, attention_mask=None, past_key_values=None):
+        """FlashMLA absorbed forward path.
+
+        After weight absorption:
+        - Q: [B, S, H, 576] (512 absorbed nope + 64 rope)
+        - KV cache: [num_pages, page_size, 1, 576] (512 compressed + 64 rope)
+        - V output dim: 512 (kv_lora_rank)
+
+        Uses flash_mla_with_kvcache for decode, eager for prefill.
+        """
+        batch_size, seq_length = hidden_states.shape[:-1]
+        cos, sin = position_embeddings
+
+        # --- Query (absorbed: nope is now kv_lora_rank=512) ---
+        if self.q_lora_rank is None:
+            query_states = self.q_proj(hidden_states)
+            q_resid = None
+        else:
+            q_resid = self.q_a_layernorm(self.q_a_proj(hidden_states))
+            query_states = self.q_b_proj(q_resid)
+        query_states = query_states.view(batch_size, seq_length, self.num_heads, self._absorbed_qk_dim)
+        q_nope, q_pe = torch.split(query_states, [self._absorbed_v_dim, self.qk_rope_head_dim], dim=-1)
+        q_pe = apply_rotary_pos_emb(q_pe.transpose(1, 2), cos, sin, unsqueeze_dim=1).transpose(1, 2)
+        query_states = torch.cat([q_nope, q_pe], dim=-1)  # [B, S, H, 576]
+
+        # --- KV (compressed, no kv_b_proj expansion needed) ---
+        compressed_kv = self.kv_a_proj_with_mqa(hidden_states)
+        k_compressed, k_pe = torch.split(compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        k_compressed = self.kv_a_layernorm(k_compressed)
+        k_pe = apply_rotary_pos_emb(k_pe.unsqueeze(2), cos, sin, unsqueeze_dim=2).squeeze(2)
+        kv_cache_entry = torch.cat([k_compressed, k_pe], dim=-1)  # [B, S, 576]
+
+        # --- DSA indexer ---
+        indexer_mask = (
+            attention_mask[:, 0, :, :]
+            if attention_mask is not None and attention_mask.dim() == 4
+            else attention_mask.unsqueeze(1) if attention_mask is not None
+            else None
+        )
+        topk_indices = self.indexer(
+            hidden_states, q_resid, position_embeddings, indexer_mask,
+            use_cache=past_key_values is not None,
+        )
+
+        # --- FlashMLA decode path (B>=1, S=1) ---
+        if self.use_flash_mla and seq_length == 1 and isinstance(past_key_values, PagedKVCache):
+            kv_page_cache = past_key_values.get_kv_cache(self.layer_idx)
+            block_table = past_key_values.get_block_table(self.layer_idx)
+            cache_seqlens = past_key_values.seq_lengths[self.layer_idx]
+
+            metadata, _ = get_mla_metadata(
+                cache_seqlens,
+                past_key_values.page_block_size * torch.ones(1, dtype=torch.int32, device=hidden_states.device),
+            )
+
+            attn_output, _ = flash_mla_with_kvcache(
+                query_states,  # [B, 1, H, 576]
+                kv_page_cache,  # [num_pages, page_size, 1, 576]
+                block_table,
+                cache_seqlens,
+                head_dim_v=self._absorbed_v_dim,  # 512
+                tile_scheduler_metadata=metadata,
+                softmax_scale=self._absorbed_qk_dim ** -0.5,
+                causal=False,  # causal handled by cache_seqlens
+            )
+            # attn_output: [B, 1, H, 512]
+            attn_output = attn_output.reshape(batch_size, seq_length, -1)
+            attn_output = self.o_proj(attn_output)
+            return attn_output, None
+
+        # --- Eager fallback for prefill or non-paged cache ---
+        kv_cache_entry = kv_cache_entry.unsqueeze(2)  # [B, S, 1, 576]
+        k_states = kv_cache_entry.expand(-1, -1, self.num_heads, -1).transpose(1, 2)  # [B, H, S, 576]
+        v_states = k_states[..., :self._absorbed_v_dim]  # [B, H, S, 512]
+        query_states = query_states.transpose(1, 2)  # [B, H, S, 576]
+
+        if past_key_values is not None and hasattr(past_key_values, 'update'):
+            k_states, v_states = past_key_values.update(k_states, v_states, self.layer_idx)
+
+        total_len = k_states.shape[2]
+        combined_mask = _build_dsa_mask(topk_indices, attention_mask, query_states, total_len)
+
+        attn_output, attn_weights = _eager_attention_forward(
+            query_states, k_states, v_states, combined_mask,
+            scaling=self._absorbed_qk_dim ** -0.5,
+            num_key_value_groups=1,  # absorbed: all heads share same KV
+            dropout=0.0 if not self.training else self.attention_dropout,
+            training=self.training,
+        )
+
+        attn_output = attn_output.reshape(batch_size, seq_length, -1).contiguous()
+        attn_output = self.o_proj(attn_output)
+        return attn_output, attn_weights
+
+    def _eager_forward(self, hidden_states, position_embeddings, attention_mask=None, past_key_values=None):
+        """Non-absorbed eager forward path (identical to glm5-triton)."""
         batch_size, seq_length = hidden_states.shape[:-1]
         cos, sin = position_embeddings
 
@@ -173,14 +333,7 @@ class MLAttention(nn.Module):
             use_cache=past_key_values is not None,
         )
 
-        # --- Attention (FlashMLA or eager fallback) ---
-        # NOTE: FlashMLA requires absorbed weights for full acceleration.
-        # This implementation uses the non-absorbed path with eager attention
-        # as the default. To use FlashMLA kernels, call absorb_weights() first
-        # and use the absorbed forward path.
-        #
-        # For now, we use eager attention with DSA sparse masking, identical
-        # to glm5-triton but with the kernel infrastructure in place.
+        # --- Eager attention with DSA sparse masking ---
         total_len = key_states.shape[2]
         combined_mask = _build_dsa_mask(topk_indices, attention_mask, query_states, total_len)
 

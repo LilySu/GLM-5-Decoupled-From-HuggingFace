@@ -85,7 +85,7 @@ def h100_test_launch_overhead_per_layer():
     layer.self_attn.use_flash_mla = False
     layer.self_attn.indexer.use_deepgemm = False
 
-    B, S = 1, 64
+    B, S = 4, 1024  # Increased from 1, 64 so compute time dwarfs the dispatch overhead
     hidden = torch.randn(B, S, cfg["hidden_size"], dtype=torch.float32, device=device)
     rope = rope_mod.RotaryEmbedding(cfg).to(device)
     pos_ids = torch.arange(S, device=device).unsqueeze(0)

@@ -1,0 +1,11 @@
+.git
+__pycache__
+*.pyc
+*.pyo
+results/
+*.json
+*.egg-info/
+dist/
+build/
+.venv/
+.deep_gemm_cache/

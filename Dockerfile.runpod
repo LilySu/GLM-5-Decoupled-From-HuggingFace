@@ -1,0 +1,75 @@
+# GLM-5 Kernels: RunPod-optimized variant
+# Uses RunPod's official PyTorch base image (pre-configured for their infra).
+#
+# RunPod base includes: PyTorch, CUDA, cuDNN, NCCL, Jupyter, SSH
+# We add: FlashMLA, DeepGEMM, FlashInfer, Triton, project deps
+#
+# Build:
+#   docker build -t glm5-kernels:runpod -f Dockerfile.runpod .
+#
+# Deploy on RunPod:
+#   Push to Docker Hub, then use as custom template image.
+
+# NOTE: If a runpod/pytorch image with torch 2.8 exists, use it instead.
+# PyTorch 2.8 renamed torch.cuda.mem_get_info().total_mem → .total_memory.
+# All our benchmark code targets 2.8.
+FROM runpod/pytorch:2.6.0-py3.12-cuda12.8.1-devel-ubuntu24.04
+
+# uv for fast dependency management
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
+
+# Upgrade PyTorch to 2.8 (base image has 2.6, but our code requires 2.8 API)
+RUN uv pip install --system torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+
+# Python deps (uv into the existing system Python — RunPod expects system-level packages)
+RUN uv pip install --system \
+    triton>=3.1.0 \
+    safetensors \
+    tokenizers \
+    "transformers>=4.45.0" \
+    numpy \
+    pandas \
+    scipy
+
+# FlashInfer (pip-installable wheels)
+RUN uv pip install --system flashinfer-python flashinfer-cubin && \
+    uv pip install --system flashinfer-jit-cache --index-url https://flashinfer.ai/whl/cu128
+
+# FlashMLA (build from source — SM90 Hopper kernels)
+ENV TORCH_CUDA_ARCH_LIST="9.0"
+
+# Build in /workspace so source persists across pod pause/resume
+RUN cd /workspace && \
+    git clone --recurse-submodules --depth=1 https://github.com/deepseek-ai/FlashMLA.git && \
+    cd FlashMLA && \
+    git submodule update --init --recursive --depth=1 && \
+    FLASH_MLA_DISABLE_SM100=1 MAX_JOBS=4 \
+    pip install -v --no-build-isolation . && \
+    cd /workspace
+
+# DeepGEMM (build from source — FP8 GEMM kernels)
+RUN cd /workspace && \
+    git clone --depth=1 https://github.com/deepseek-ai/DeepGEMM.git && \
+    cd DeepGEMM && \
+    git submodule update --init --recursive --depth=1 && \
+    pip install -v --no-build-isolation . && \
+    cd /workspace
+
+# DeepGEMM JIT settings
+ENV DG_JIT_USE_NVRTC=1
+ENV DG_JIT_CACHE_DIR=/workspace/.deep_gemm_cache
+RUN mkdir -p /workspace/.deep_gemm_cache
+
+# Verify everything
+RUN python3 -c "\
+import torch; print(f'PyTorch {torch.__version__}, CUDA {torch.version.cuda}'); \
+import triton; print(f'Triton {triton.__version__}'); \
+import flash_mla; print('FlashMLA OK'); \
+import deep_gemm; print('DeepGEMM OK'); \
+import flashinfer; print('FlashInfer OK'); \
+import transformers; print(f'transformers {transformers.__version__}'); \
+print('All kernel deps verified.'); \
+"
+
+WORKDIR /workspace
