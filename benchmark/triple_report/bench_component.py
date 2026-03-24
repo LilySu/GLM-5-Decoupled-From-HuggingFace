@@ -4,8 +4,7 @@ Tests how kernels perform within a FULL DECODER LAYER — not in isolation.
 This captures inter-kernel overhead: quantization boundaries, memory allocation,
 Python dispatch between components, and data format conversions.
 
-Methodology: Run a single decoder layer forward pass (attention + MoE/dense FFN)
-and measure total time vs sum of component times. The difference is "glue overhead."
+Fixes the hyphenated directory import problem by creating temporary symlinks.
 
 References:
 - MegaBlocks (MLSys '23): MoE kernels must be evaluated on full pipeline, not just GEMM
@@ -15,6 +14,7 @@ References:
 import argparse
 import sys
 import os
+import traceback
 import torch
 
 # Add project root to path
@@ -31,83 +31,65 @@ from benchmark.shared.config import GLM5_CONFIG, H100_SPECS
 from benchmark.shared.report import print_summary_table
 
 
-def bench_single_layer(layer_type: str, B: int, S: int, T: int,
-                       impl: str, cfg: dict, warmup: int = 10, iters: int = 50):
-    """Benchmark a single decoder layer (attention + MLP/MoE + norms + residuals).
+def _ensure_symlinks():
+    """Create underscore-named symlinks for hyphenated model directories.
 
-    Args:
-        layer_type: "dense" (layers 0-2) or "sparse" (layers 3-77, MoE)
-        B: batch size
-        S: sequence length (prefill) or 1 (decode)
-        T: context length (KV cache length for decode)
-        impl: "flashmla" | "flashinfer" | "eager"
-        cfg: model config dict
+    Python cannot import from directories with hyphens in the name.
+    This creates symlinks like glm5_kernels_flashmla_deepgemm -> glm5-kernels-flashmla-deepgemm
     """
+    mappings = {
+        "glm5-kernels-flashmla-deepgemm": "glm5_kernels_flashmla_deepgemm",
+        "glm5-kernels-flashinfer": "glm5_kernels_flashinfer",
+        "glm5-raw-decoupled-from-hf": "glm5_raw_decoupled_from_hf",
+        "glm5-triton": "glm5_triton",
+    }
+    for hyphenated, underscored in mappings.items():
+        src = os.path.join(PROJECT_ROOT, hyphenated)
+        dst = os.path.join(PROJECT_ROOT, underscored)
+        if os.path.isdir(src) and not os.path.exists(dst):
+            try:
+                os.symlink(src, dst)
+            except OSError:
+                pass  # May fail on some filesystems
+
+
+def _import_decoder_layer(impl):
+    """Import DecoderLayer from the correct model directory.
+
+    Uses symlinks to work around Python's inability to import from
+    hyphenated directory names.
+    """
+    _ensure_symlinks()
+
+    if impl in ("flashmla", "eager"):
+        pkg = "glm5_kernels_flashmla_deepgemm"
+    elif impl == "flashinfer":
+        pkg = "glm5_kernels_flashinfer"
+    else:
+        raise ValueError(f"Unknown impl: {impl}")
+
+    # Add project root so the underscore-named symlink is importable
+    if PROJECT_ROOT not in sys.path:
+        sys.path.insert(0, PROJECT_ROOT)
+
+    # Import the model module from the symlinked package
+    mod = __import__(f"{pkg}.model", fromlist=["DecoderLayer"])
+    return mod.DecoderLayer
+
+
+def bench_single_layer(layer_type, B, S, T, impl, cfg, warmup=10, iters=50):
+    """Benchmark a single decoder layer (attention + MLP/MoE + norms + residuals)."""
     device = torch.device("cuda")
 
-    # Import model layer based on implementation.
-    # The model directories use relative imports (from .mla_attention import ...)
-    # so we must import them as packages, not by sys.path insertion.
     try:
-        import importlib
-        if impl in ("flashmla", "eager"):
-            pkg_name = "glm5-kernels-flashmla-deepgemm"
-        elif impl == "flashinfer":
-            pkg_name = "glm5-kernels-flashinfer"
-        else:
-            raise ValueError(f"Unknown impl: {impl}")
-
-        pkg_dir = os.path.join(PROJECT_ROOT, pkg_name)
-        if not os.path.isdir(pkg_dir):
-            raise ImportError(f"Directory not found: {pkg_dir}")
-
-        # Convert hyphenated dir name to valid Python: add parent to path and use importlib
-        # The package has __init__.py, so we load model.py from within it
-        model_path = os.path.join(pkg_dir, "model.py")
-        if not os.path.isfile(model_path):
-            raise ImportError(f"model.py not found in {pkg_dir}")
-
-        # Ensure parent dir is on sys.path so "from .xxx import" works
-        parent_dir = os.path.dirname(pkg_dir)
-        if parent_dir not in sys.path:
-            sys.path.insert(0, parent_dir)
-
-        # Python can't import hyphenated package names directly.
-        # Workaround: create a symlink or use importlib with the actual path.
-        # Simplest: temporarily rename in sys.modules
-        pkg_python_name = pkg_name.replace("-", "_")
-        spec = importlib.util.spec_from_file_location(
-            f"{pkg_python_name}.model",
-            model_path,
-            submodule_search_locations=[pkg_dir],
-        )
-        # First register the package itself so relative imports work
-        pkg_init = os.path.join(pkg_dir, "__init__.py")
-        if os.path.isfile(pkg_init):
-            pkg_spec = importlib.util.spec_from_file_location(
-                pkg_python_name, pkg_init,
-                submodule_search_locations=[pkg_dir],
-            )
-            pkg_mod = importlib.util.module_from_spec(pkg_spec)
-            sys.modules[pkg_python_name] = pkg_mod
-            try:
-                pkg_spec.loader.exec_module(pkg_mod)
-            except Exception:
-                pass  # __init__.py may have optional imports that fail
-
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules[f"{pkg_python_name}.model"] = mod
-        spec.loader.exec_module(mod)
-        DecoderLayer = mod.DecoderLayer
-
-    except (ImportError, AttributeError, Exception) as e:
+        DecoderLayer = _import_decoder_layer(impl)
+    except Exception as e:
         return BenchResult(
             name=f"layer_{layer_type}", impl=impl,
             config={"B": B, "S": S, "T": T, "type": layer_type},
-            is_oom=False, error=f"Import failed: {e}",
+            error=f"Import failed: {e}",
         )
 
-    # Build a single layer
     try:
         test_cfg = dict(cfg)
         test_cfg["num_hidden_layers"] = 1
@@ -120,7 +102,6 @@ def bench_single_layer(layer_type: str, B: int, S: int, T: int,
         hidden = torch.randn(B, S, cfg["hidden_size"], dtype=torch.bfloat16, device=device)
         position_ids = torch.arange(T - S, T, device=device).unsqueeze(0).expand(B, -1)
 
-        # Warmup
         with torch.no_grad():
             for _ in range(3):
                 _ = layer(hidden, position_ids=position_ids)
@@ -136,10 +117,9 @@ def bench_single_layer(layer_type: str, B: int, S: int, T: int,
         return BenchResult(
             name=f"layer_{layer_type}", impl=impl,
             config={"B": B, "S": S, "T": T, "type": layer_type},
-            error=str(e),
+            error=f"Setup failed: {e}",
         )
 
-    # Benchmark
     def run():
         with torch.no_grad():
             _ = layer(hidden, position_ids=position_ids)
@@ -153,8 +133,13 @@ def bench_single_layer(layer_type: str, B: int, S: int, T: int,
             config={"B": B, "S": S, "T": T, "type": layer_type},
             is_oom=True,
         )
+    except Exception as e:
+        return BenchResult(
+            name=f"layer_{layer_type}", impl=impl,
+            config={"B": B, "S": S, "T": T, "type": layer_type},
+            error=f"Benchmark failed: {e}",
+        )
 
-    # Compute FLOPs for the layer
     H = cfg["num_attention_heads"]
     d_qk = cfg.get("d_qk_absorbed", 576)
     d_v = cfg.get("d_v_absorbed", 512)
@@ -166,7 +151,6 @@ def bench_single_layer(layer_type: str, B: int, S: int, T: int,
             cfg["hidden_size"], cfg["moe_intermediate_size"]
         )
     else:
-        # Dense FFN: 2 matmuls (gate+up fused, down)
         moe_flops = 2 * B * S * cfg["hidden_size"] * cfg["intermediate_size"] * 3
 
     total_flops = attn_flops + moe_flops
@@ -192,20 +176,14 @@ def bench_single_layer(layer_type: str, B: int, S: int, T: int,
     )
 
 
-def run_component_benchmark(output_dir: str = "results/triple_report"):
-    """Run the component integration benchmark.
-
-    Tests both dense and MoE layers across decode and prefill modes.
-    """
+def run_component_benchmark(output_dir="results/triple_report"):
+    """Run the component integration benchmark. Saves partial results on failure."""
     results = []
     cfg = GLM5_CONFIG
 
     configs = [
-        # Decode: B=32, S=1, T=4096 (memory-bound)
         {"B": 32, "S": 1, "T": 4096, "label": "decode_B32_T4K"},
-        # Prefill: B=1, S=128, T=128 (compute-bound)
         {"B": 1, "S": 128, "T": 128, "label": "prefill_B1_S128"},
-        # Long context decode: B=4, S=1, T=16384
         {"B": 4, "S": 1, "T": 16384, "label": "decode_B4_T16K"},
     ]
 
@@ -213,20 +191,27 @@ def run_component_benchmark(output_dir: str = "results/triple_report"):
         for layer_type in ["dense", "sparse"]:
             for impl in ["eager", "flashmla", "flashinfer"]:
                 print(f"  {c['label']} | {layer_type} | {impl}...", end=" ", flush=True)
-                result = bench_single_layer(
-                    layer_type, c["B"], c["S"], c["T"], impl, cfg,
-                )
+                try:
+                    result = bench_single_layer(
+                        layer_type, c["B"], c["S"], c["T"], impl, cfg,
+                    )
+                except Exception as e:
+                    result = BenchResult(
+                        name=f"layer_{layer_type}", impl=impl,
+                        config={"B": c["B"], "S": c["S"], "T": c["T"], "type": layer_type},
+                        error=f"Uncaught: {e}",
+                    )
+
                 if result.is_oom:
                     print("OOM")
                 elif result.error:
-                    print(f"ERROR: {result.error}")
+                    print(f"ERROR: {result.error[:60]}")
                 else:
                     print(f"{result.median_ms:.3f} ms | {result.mfu_pct:.1f}% MFU")
                 results.append(result)
-
                 torch.cuda.empty_cache()
 
-    # Report
+    # ALWAYS save results — even if some failed
     print_summary_table(results, "Triple Report Level 2: Component Integration")
     env = capture_environment()
     save_results(results, output_dir, "triple_report_component", env)
@@ -235,6 +220,7 @@ def run_component_benchmark(output_dir: str = "results/triple_report"):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Triple Report Level 2: Component Integration")
-    parser.add_argument("--output-dir", default="results/triple_report")
+    parser.add_argument("--output-dir", default="results/triple")
     args = parser.parse_args()
+    os.makedirs(args.output_dir, exist_ok=True)
     run_component_benchmark(args.output_dir)
