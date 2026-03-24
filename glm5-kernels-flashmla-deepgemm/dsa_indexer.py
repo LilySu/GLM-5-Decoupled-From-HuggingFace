@@ -110,32 +110,46 @@ class DSAIndexer(nn.Module):
         return index_scores.topk(topk, dim=-1).indices
 
     def _deepgemm_score(self, q, k_cached, weights):
-        """Use DeepGEMM fp8_mqa_logits for fused scoring on H100."""
+        """Use DeepGEMM fp8_mqa_logits for fused scoring on H100.
+
+        API confirmed by debug_all_kernels2.py (Approach D):
+        - q: raw FP8 tensor [S, H, D] (NOT a tuple)
+        - kv: tuple of (FP8 tensor [T, D], 1D scales [T])
+        - weights: [S, H] float32
+        - cu_k_start/end: [S] int32
+
+        The kernel fuses: ReLU(q · k^T) * weights → logits [S, T]
+        """
         # q: [1, S, H, D], k_cached: [1, T, D], weights: [1, S, H]
-        q_2d = q.squeeze(0)         # [S, H, D]
+        q_3d = q.squeeze(0)         # [S, H, D]
         k_2d = k_cached.squeeze(0)  # [T, D]
         w_2d = weights.squeeze(0)   # [S, H]
 
-        # Quantize to FP8
-        # q: raw FP8 tensor (NOT a tuple) — confirmed by debug_all_kernels2.py Approach D
-        q_fp8 = q_2d.to(torch.float8_e4m3fn)
-        # kv: tuple of (FP8 tensor, 1D scales) — scales MUST be 1D [seq_kv]
-        # per_custom_dims_cast_to_fp8 gives wrong dims; use manual per-row scaling
-        k_fp8 = k_2d.to(torch.float8_e4m3fn)
-        k_scales = k_2d.abs().amax(dim=-1).float() / 448.0  # 1D [T]
-
-        seq_len = q_2d.shape[0]
+        seq_len = q_3d.shape[0]
         seq_len_kv = k_2d.shape[0]
 
-        # Causal range: each query i can see keys 0..i (for prefill)
-        # For decode: each query sees all cached keys
-        cu_k_start = torch.zeros(seq_len, dtype=torch.int32, device=q.device)
-        cu_k_end = torch.arange(seq_len_kv - seq_len + 1, seq_len_kv + 1,
-                                dtype=torch.int32, device=q.device)
-        if cu_k_end.shape[0] < seq_len:
-            # Decode: single token sees all
-            cu_k_end = torch.full((seq_len,), seq_len_kv, dtype=torch.int32, device=q.device)
+        # ── FP8 quantization ──────────────────────────────────────────
+        # Q: raw FP8 tensor (NOT a tuple) — Approach D from debug
+        q_fp8 = q_3d.to(torch.float8_e4m3fn)
 
+        # KV: tuple of (FP8 tensor [T, D], 1D scales [T])
+        # Scales MUST be 1D — per_custom_dims_cast_to_fp8 gives wrong dims
+        k_fp8 = k_2d.to(torch.float8_e4m3fn)
+        k_scales = k_2d.abs().amax(dim=-1).float().clamp(min=1e-4) / 448.0
+
+        # ── Causal sequence ranges ────────────────────────────────────
+        cu_k_start = torch.zeros(seq_len, dtype=torch.int32, device=q.device)
+        if seq_len == 1:
+            # Decode: single query sees all cached tokens [0, T)
+            cu_k_end = torch.full((1,), seq_len_kv, dtype=torch.int32, device=q.device)
+        else:
+            # Prefill: query i sees tokens [0, i+1) (causal)
+            cu_k_end = torch.arange(
+                seq_len_kv - seq_len + 1, seq_len_kv + 1,
+                dtype=torch.int32, device=q.device,
+            )
+
+        # ── Kernel call ───────────────────────────────────────────────
         logits = deep_gemm.fp8_mqa_logits(
             q_fp8, (k_fp8, k_scales), w_2d,
             cu_k_start, cu_k_end,
