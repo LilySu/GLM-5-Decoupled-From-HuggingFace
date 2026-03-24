@@ -157,9 +157,12 @@ def bench_single_layer(layer_type, B, S, T, impl, cfg, warmup=10, iters=50):
         test_cfg = dict(cfg)
         test_cfg["num_hidden_layers"] = 1
         test_cfg["mlp_layer_types"] = [layer_type]
-        if impl == "eager":
-            test_cfg["use_flash_mla"] = False
-            test_cfg["use_deepgemm"] = False
+        # ALWAYS use eager mode for component benchmarks with random weights.
+        # Kernel paths (FlashMLA/DeepGEMM) produce CUDA index-out-of-bounds
+        # with random weights because the DSA indexer and MoE router generate
+        # invalid expert/token indices. Real kernel benchmarks need real weights.
+        test_cfg["use_flash_mla"] = False
+        test_cfg["use_deepgemm"] = False
 
         layer = DecoderLayer(test_cfg, layer_idx=0).to(device).bfloat16().eval()
 
