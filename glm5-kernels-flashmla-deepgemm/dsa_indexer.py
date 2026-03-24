@@ -117,9 +117,12 @@ class DSAIndexer(nn.Module):
         w_2d = weights.squeeze(0)   # [S, H]
 
         # Quantize to FP8
+        # q: raw FP8 tensor (NOT a tuple) — confirmed by debug_all_kernels2.py Approach D
         q_fp8 = q_2d.to(torch.float8_e4m3fn)
-        from .fp8_utils import quantize_activations_deepgemm
-        k_fp8, k_scales = quantize_activations_deepgemm(k_2d)
+        # kv: tuple of (FP8 tensor, 1D scales) — scales MUST be 1D [seq_kv]
+        # per_custom_dims_cast_to_fp8 gives wrong dims; use manual per-row scaling
+        k_fp8 = k_2d.to(torch.float8_e4m3fn)
+        k_scales = k_2d.abs().amax(dim=-1).float() / 448.0  # 1D [T]
 
         seq_len = q_2d.shape[0]
         seq_len_kv = k_2d.shape[0]
