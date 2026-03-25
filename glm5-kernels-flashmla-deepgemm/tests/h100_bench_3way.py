@@ -408,6 +408,10 @@ def main():
         print("ERROR: CUDA required")
         sys.exit(1)
 
+    # All GLM-5 model code expects BF16. Without this, nn.Linear weights init as
+    # float32 and mismatch the BF16 input tensors from make_inputs().
+    torch.set_default_dtype(torch.bfloat16)
+
     device = "cuda"
     props = torch.cuda.get_device_properties(device)
     print(f"GPU: {props.name} (SM{props.major}{props.minor}, {props.total_memory / 1e9:.1f} GB)")
