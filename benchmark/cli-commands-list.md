@@ -38,6 +38,28 @@ Full MoE sweep, 1440 configs (~2 hours) — only worth it for SC'25-style parame
 cd /workspace/GLM-5-Decoupled-From-HuggingFace && python3 -m benchmark.moe_sweep.bench_moe --output-dir results/moe_full/
 ```
 
+## Serving profile experiments (NEW)
+
+Prefill vs Decode phase separation (~20 min):
+```
+cd /workspace/GLM-5-Decoupled-From-HuggingFace && python3 -m benchmark.bench_serving_profile --experiment prefill-decode --output-dir results/serving_profile/
+```
+
+MoE expert routing skew — uniform vs Zipf (~10 min):
+```
+cd /workspace/GLM-5-Decoupled-From-HuggingFace && python3 -m benchmark.bench_serving_profile --experiment routing-skew --output-dir results/serving_profile/
+```
+
+KV cache memory footprint and MLA compression ratio (~2 min):
+```
+cd /workspace/GLM-5-Decoupled-From-HuggingFace && python3 -m benchmark.bench_serving_profile --experiment memory --output-dir results/serving_profile/
+```
+
+All three serving profile experiments (~30 min):
+```
+cd /workspace/GLM-5-Decoupled-From-HuggingFace && python3 -m benchmark.bench_serving_profile --experiment all --output-dir results/serving_profile/
+```
+
 ## Already completed
 
 - `h100_bench --full-dims` — FlashMLA 228 TFLOPS, DeepGEMM MoE 606 TFLOPS, dense layer 2.7ms, sparse layer 4.8ms
