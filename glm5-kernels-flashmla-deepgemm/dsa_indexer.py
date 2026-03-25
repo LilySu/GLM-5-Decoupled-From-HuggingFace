@@ -57,6 +57,7 @@ class DSAIndexer(nn.Module):
 
         self._cached_keys = None
         self.use_deepgemm = DEEP_GEMM_AVAILABLE
+        self._deepgemm_verified = False
 
     @torch.no_grad()
     def forward(self, hidden_states, q_resid, position_embeddings, attention_mask=None, use_cache=False):
@@ -95,7 +96,20 @@ class DSAIndexer(nn.Module):
         if self.use_deepgemm and batch_size == 1:
             # DeepGEMM path: fused FP8 MQA logits kernel
             # fp8_mqa_logits expects: q [seq_len, n_heads, head_dim], kv [seq_len_kv, head_dim]
-            index_scores = self._deepgemm_score(q, k_cached, weights)
+            # Note: fp8_mqa_logits JIT fails on CUDA 12.8 (needs 12.9). Fall back gracefully.
+            try:
+                index_scores = self._deepgemm_score(q, k_cached, weights)
+                self._deepgemm_verified = True
+            except RuntimeError:
+                if not self._deepgemm_verified:
+                    self.use_deepgemm = False
+                    index_scores = None
+                else:
+                    raise
+            if index_scores is None:
+                scores = torch.einsum("bshd,btd->bsht", q.float(), k_cached.float()) * self.softmax_scale
+                scores = F.relu(scores)
+                index_scores = torch.einsum("bsht,bsh->bst", scores, weights)
         else:
             # PyTorch fallback
             scores = torch.einsum("bshd,btd->bsht", q.float(), k_cached.float()) * self.softmax_scale
